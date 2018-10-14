@@ -181,28 +181,28 @@ AT_GetHidInputValueCaps(PHIDP_PREPARSED_DATA preparsedData)
 // Reads a single HID report value.
 static ULONG
 AT_GetHidUsageValue(
-	HIDP_REPORT_TYPE reportType,
-	USAGE usagePage,
-	USHORT linkCollection,
-	USAGE usage,
-	PHIDP_PREPARSED_DATA preparsedData,
-	PBYTE report,
-	ULONG reportLen)
+    HIDP_REPORT_TYPE reportType,
+    USAGE usagePage,
+    USHORT linkCollection,
+    USAGE usage,
+    PHIDP_PREPARSED_DATA preparsedData,
+    PBYTE report,
+    ULONG reportLen)
 {
-	ULONG value;
-	NTSTATUS status = HidP_GetUsageValue(
-		HidP_Input,
-		usagePage,
-		linkCollection,
-		usage,
-		&value,
-		preparsedData,
-		(PCHAR)report,
-		reportLen);
-	if (status != HIDP_STATUS_SUCCESS) {
-		throw hid_error(status);
-	}
-	return value;
+    ULONG value;
+    NTSTATUS status = HidP_GetUsageValue(
+        HidP_Input,
+        usagePage,
+        linkCollection,
+        usage,
+        &value,
+        preparsedData,
+        (PCHAR)report,
+        reportLen);
+    if (status != HIDP_STATUS_SUCCESS) {
+        throw hid_error(status);
+    }
+    return value;
 }
 
 // Registers the specified window to receive touchpad HID events.
@@ -348,7 +348,7 @@ AT_HandleRawInput(WPARAM *wParam, LPARAM *lParam)
     t_injectedInput.header.hDevice = input->header.hDevice;
     t_injectedInput.data.mouse.usFlags = MOUSE_MOVE_ABSOLUTE;
     t_injectedInput.data.mouse.ulExtraInformation = 0;
-	t_injectedInput.data.mouse.usButtonFlags = 0;
+    t_injectedInput.data.mouse.usButtonFlags = 0;
     t_injectedInput.data.mouse.usButtonData = 0;
     t_injectedInput.data.mouse.lLastX = screenPoint.x;
     t_injectedInput.data.mouse.lLastY = screenPoint.y;
@@ -422,9 +422,9 @@ AT_WndProcHook(
             debugf("AT_WndProcHook: handled WM_INPUT\n");
             return DefWindowProcW(hWnd, message, wParam, lParam);
         }
-	} else {
-		debugf("WndProc(message=%d)\n", message);
-	}
+    } else {
+        debugf("WndProc(message=%d)\n", message);
+    }
     return CallWindowProcW(g_originalWndProcs[hWnd], hWnd, message, wParam, lParam);
 }
 
@@ -462,7 +462,7 @@ AT_GetWindowLongPtrWHook(
     if (nIndex == GWLP_WNDPROC && g_originalWndProcs.count(hWnd)) {
         return (LONG_PTR)g_originalWndProcs[hWnd];
     }
-	return g_originalGetWindowLongPtrW(hWnd, nIndex);
+    return g_originalGetWindowLongPtrW(hWnd, nIndex);
 }
 
 // Hook for SetWindowLongPtrW(). Ensures that applications do not overwrite
@@ -475,11 +475,11 @@ AT_SetWindowLongPtrWHook(
 {
     debugf("SetWindowLongPtrW(hwnd=%x, index=%d, new=%x)\n", hWnd, nIndex, dwNewLong);
     if (nIndex == GWLP_WNDPROC && g_originalWndProcs.count(hWnd)) {
-		WNDPROC origWndProc = g_originalWndProcs[hWnd];
-		g_originalWndProcs[hWnd] = (WNDPROC)dwNewLong;
-		return (LONG_PTR)origWndProc;
+        WNDPROC origWndProc = g_originalWndProcs[hWnd];
+        g_originalWndProcs[hWnd] = (WNDPROC)dwNewLong;
+        return (LONG_PTR)origWndProc;
     }
-	return g_originalSetWindowLongPtrW(hWnd, nIndex, dwNewLong);
+    return g_originalSetWindowLongPtrW(hWnd, nIndex, dwNewLong);
 }
 
 #else
@@ -495,7 +495,7 @@ AT_GetWindowLongWHook(
     if (nIndex == GWL_WNDPROC && g_originalWndProcs.count(hWnd)) {
         return (LONG)g_originalWndProcs[hWnd];
     }
-	return g_originalGetWindowLongW(hWnd, nIndex);
+    return g_originalGetWindowLongW(hWnd, nIndex);
 }
 
 // Hook for SetWindowLongW(). Ensures that applications do not overwrite
@@ -508,10 +508,10 @@ AT_SetWindowLongWHook(
 {
     debugf("SetWindowLongW(hwnd=%x, index=%d, new=%x)\n", hWnd, nIndex, dwNewLong);
     if (nIndex == GWL_WNDPROC && g_originalWndProcs.count(hWnd)) {
-		WNDPROC origWndProc = g_originalWndProcs[hWnd];
-		g_originalWndProcs[hWnd] = (WNDPROC)dwNewLong;
-		return (LONG)origWndProc;
-	}
+        WNDPROC origWndProc = g_originalWndProcs[hWnd];
+        g_originalWndProcs[hWnd] = (WNDPROC)dwNewLong;
+        return (LONG)origWndProc;
+    }
     return g_originalSetWindowLongW(hWnd, nIndex, dwNewLong);
 }
 
@@ -539,11 +539,11 @@ AT_CreateWindowExWHook(
         X, Y, nWidth, nHeight,
         hWndParent, hMenu, hInstance, lpParam);
     debugf("CreateWindowExW() -> hwnd=%x\n", hWnd);
-	WNDPROC origWndProc;
+    WNDPROC origWndProc;
 #if _WIN64
-	origWndProc = (WNDPROC)g_originalSetWindowLongPtrW(hWnd, GWLP_WNDPROC, (LONG_PTR)AT_WndProcHook);
+    origWndProc = (WNDPROC)g_originalSetWindowLongPtrW(hWnd, GWLP_WNDPROC, (LONG_PTR)AT_WndProcHook);
 #else
-	origWndProc = (WNDPROC)g_originalSetWindowLongW(hWnd, GWL_WNDPROC, (LONG)AT_WndProcHook);
+    origWndProc = (WNDPROC)g_originalSetWindowLongW(hWnd, GWL_WNDPROC, (LONG)AT_WndProcHook);
 #endif
     g_originalWndProcs[hWnd] = origWndProc;
     return hWnd;
@@ -576,15 +576,15 @@ AT_Initialize()
     DetourAttach((void **)&g_originalGetRawInputData, AT_GetRawInputDataHook);
     DetourAttach((void **)&g_originalCreateWindowExW, AT_CreateWindowExWHook);
 #if _WIN64
-	DetourAttach((void **)&g_originalGetWindowLongPtrW, AT_GetWindowLongPtrWHook);
-	DetourAttach((void **)&g_originalSetWindowLongPtrW, AT_SetWindowLongPtrWHook);
+    DetourAttach((void **)&g_originalGetWindowLongPtrW, AT_GetWindowLongPtrWHook);
+    DetourAttach((void **)&g_originalSetWindowLongPtrW, AT_SetWindowLongPtrWHook);
 #else
-	DetourAttach((void **)&g_originalGetWindowLongW, AT_GetWindowLongWHook);
-	DetourAttach((void **)&g_originalSetWindowLongW, AT_SetWindowLongWHook);
+    DetourAttach((void **)&g_originalGetWindowLongW, AT_GetWindowLongWHook);
+    DetourAttach((void **)&g_originalSetWindowLongW, AT_SetWindowLongWHook);
 #endif
-	if (DetourTransactionCommit() != NO_ERROR) {
-		throw std::runtime_error("Failed to commit Detours transaction");
-	}
+    if (DetourTransactionCommit() != NO_ERROR) {
+        throw std::runtime_error("Failed to commit Detours transaction");
+    }
 }
 
 // Called at shutdown to unpatch ann the WinAPI functions
@@ -592,15 +592,15 @@ AT_Initialize()
 static void
 AT_Uninitialize()
 {
-	// Restore original WndProc functions
-	for (auto &wndproc : g_originalWndProcs) {
+    // Restore original WndProc functions
+    for (auto &wndproc : g_originalWndProcs) {
 #if _WIN64
-		g_originalSetWindowLongPtrW(wndproc.first, GWLP_WNDPROC, (LONG_PTR)wndproc.second);
+        g_originalSetWindowLongPtrW(wndproc.first, GWLP_WNDPROC, (LONG_PTR)wndproc.second);
 #else
-		g_originalSetWindowLongW(wndproc.first, GWL_WNDPROC, (LONG)wndproc.second);
+        g_originalSetWindowLongW(wndproc.first, GWL_WNDPROC, (LONG)wndproc.second);
 #endif
-	}
-	g_originalWndProcs.clear();
+    }
+    g_originalWndProcs.clear();
 
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
@@ -608,15 +608,15 @@ AT_Uninitialize()
     DetourDetach((void **)&g_originalGetRawInputData, AT_GetRawInputDataHook);
     DetourDetach((void **)&g_originalCreateWindowExW, AT_CreateWindowExWHook);
 #if _WIN64
-	DetourDetach((void **)&g_originalGetWindowLongPtrW, AT_GetWindowLongPtrWHook);
-	DetourDetach((void **)&g_originalSetWindowLongPtrW, AT_SetWindowLongPtrWHook);
+    DetourDetach((void **)&g_originalGetWindowLongPtrW, AT_GetWindowLongPtrWHook);
+    DetourDetach((void **)&g_originalSetWindowLongPtrW, AT_SetWindowLongPtrWHook);
 #else
-	DetourDetach((void **)&g_originalGetWindowLongW, AT_GetWindowLongWHook);
-	DetourDetach((void **)&g_originalSetWindowLongW, AT_SetWindowLongWHook);
+    DetourDetach((void **)&g_originalGetWindowLongW, AT_GetWindowLongWHook);
+    DetourDetach((void **)&g_originalSetWindowLongW, AT_SetWindowLongWHook);
 #endif
-	if (DetourTransactionCommit() != NO_ERROR) {
-		throw std::runtime_error("Failed to commit Detours transaction");
-	}
+    if (DetourTransactionCommit() != NO_ERROR) {
+        throw std::runtime_error("Failed to commit Detours transaction");
+    }
 }
 
 BOOL APIENTRY
@@ -627,14 +627,14 @@ DllMain(HINSTANCE hModule, DWORD dwReason, PVOID lpReserved)
     }
 
     switch (dwReason) {
-	case DLL_PROCESS_ATTACH:
-		DetourRestoreAfterWith();
-		AT_CreateConsole();
-		AT_Initialize();
-		return TRUE;
+    case DLL_PROCESS_ATTACH:
+        DetourRestoreAfterWith();
+        AT_CreateConsole();
+        AT_Initialize();
+        return TRUE;
     case DLL_PROCESS_DETACH:
-		AT_Uninitialize();
-		return TRUE;
+        AT_Uninitialize();
+        return TRUE;
     default:
         return TRUE;
     }
