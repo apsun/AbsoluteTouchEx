@@ -24,6 +24,21 @@ disable raw input when using AbsoluteTouch). As a result, AbsoluteTouchEx
 may trigger some anti-cheat protection systems. I am not responsible if
 you are banned for using AbsoluteTouchEx.
 
+## How to run
+
+Ensure that `atloader.exe` and `atdll.dll` are in the same directory,
+then run the following command:
+```
+atloader.exe <path to exe to load>
+```
+
+For example, to run osu!:
+```
+atloader.exe %LocalAppData%\osu!\osu!.exe
+```
+
+AbsoluteTouchEx currently does not have any options.
+
 ## Building the project
 
 Requirements:
