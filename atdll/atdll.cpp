@@ -257,7 +257,9 @@ AT_GetDeviceInfo(RAWINPUTHEADER hdr)
 
     std::vector<HIDP_VALUE_CAPS> valueCaps = AT_GetHidInputValueCaps(dev.preparsedData.get());
     for (const HIDP_VALUE_CAPS &cap : valueCaps) {
-        if (cap.UsagePage == HID_USAGE_PAGE_DIGITIZER &&
+        if (dev.linkTouches < 0 &&
+            !cap.IsRange &&
+            cap.UsagePage == HID_USAGE_PAGE_DIGITIZER &&
             cap.NotRange.Usage == HID_USAGE_DIGITIZER_CONTACT_COUNT) {
             dev.linkTouches = cap.LinkCollection;
         } else if (!cap.IsRange && cap.IsAbsolute && cap.UsagePage == HID_USAGE_PAGE_GENERIC) {
@@ -587,7 +589,7 @@ AT_Initialize()
     }
 }
 
-// Called at shutdown to unpatch ann the WinAPI functions
+// Called at shutdown to unpatch all the WinAPI functions
 // and restore any swizzled WndProcs.
 static void
 AT_Uninitialize()
