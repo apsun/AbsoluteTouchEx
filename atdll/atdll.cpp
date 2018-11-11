@@ -28,7 +28,7 @@ public:
 
     }
 
-    DWORD code()
+    DWORD code() const
     {
         return m_errorCode;
     }
@@ -47,7 +47,7 @@ public:
 
     }
 
-    NTSTATUS code()
+    NTSTATUS code() const
     {
         return m_errorCode;
     }
@@ -306,7 +306,7 @@ AT_HandleRawInput(WPARAM *wParam, LPARAM *lParam)
     if (count == 0) {
         return true;
     }
-    
+
     ULONG numTouches = AT_GetHidUsageValue(
         HidP_Input,
         HID_USAGE_PAGE_DIGITIZER,
@@ -370,7 +370,7 @@ AT_GetRawInputDataHook(
     PUINT pcbSize,
     UINT cbSizeHeader)
 {
-    debugf("GetRawInputData(handle=%x, command=%d)\n", hRawInput, uiCommand);
+    debugf("GetRawInputData(handle=%p, command=0x%x)\n", hRawInput, uiCommand);
 
     if (hRawInput != MAGIC_HANDLE) {
         return g_originalGetRawInputData(hRawInput, uiCommand, pData, pcbSize, cbSizeHeader);
@@ -418,13 +418,23 @@ AT_WndProcHook(
     LPARAM lParam)
 {
     if (message == WM_INPUT) {
-        debugf("WndProc(message=WM_INPUT, hwnd=%x)\n", hWnd);
-        if (AT_HandleRawInput(&wParam, &lParam)) {
+        debugf("WndProc(hwnd=%p, message=WM_INPUT)\n", hWnd);
+        bool handled = false;
+        try {
+            handled = AT_HandleRawInput(&wParam, &lParam);
+        } catch (const win32_error &e) {
+            debugf("WndProc: win32_error(0x%x)\n", e.code());
+        } catch (const hid_error &e) {
+            debugf("WndProc: hid_error(0x%x)\n", e.code());
+        } catch (const std::runtime_error &e) {
+            debugf("WndProc: runtime_error(%s)\n", e.what());
+        }
+        if (handled) {
             debugf("AT_WndProcHook: handled WM_INPUT\n");
             return DefWindowProcW(hWnd, message, wParam, lParam);
         }
     } else {
-        debugf("WndProc(message=%d)\n", message);
+        debugf("WndProc(hwnd=%p, message=%u)\n", hWnd, message);
     }
     return CallWindowProcW(g_originalWndProcs[hWnd], hWnd, message, wParam, lParam);
 }
@@ -443,7 +453,11 @@ AT_RegisterRawInputDevicesHook(
         pRawInputDevices[0].usUsagePage == HID_USAGE_PAGE_GENERIC &&
         pRawInputDevices[0].usUsage == HID_USAGE_GENERIC_MOUSE) {
         debugf("RegisterRawInputDevices(mouse)\n");
-        AT_RegisterTouchpadInput(pRawInputDevices[0].hwndTarget);
+        try {
+            AT_RegisterTouchpadInput(pRawInputDevices[0].hwndTarget);
+        } catch (const win32_error &e) {
+            debugf("RegisterRawInputDevices: win32_error(0x%x)\n", e.code());
+        }
     } else {
         debugf("RegisterRawInputDevices(other)\n");
     }
@@ -459,7 +473,7 @@ AT_GetWindowLongPtrWHook(
     HWND hWnd,
     int nIndex)
 {
-    debugf("GetWindowLongPtrW(hwnd=%x, index=%d)\n", hWnd, nIndex);
+    debugf("GetWindowLongPtrW(hwnd=%p, index=%d)\n", hWnd, nIndex);
     if (nIndex == GWLP_WNDPROC && g_originalWndProcs.count(hWnd)) {
         return (LONG_PTR)g_originalWndProcs[hWnd];
     }
@@ -474,7 +488,7 @@ AT_SetWindowLongPtrWHook(
     int nIndex,
     LONG_PTR dwNewLong)
 {
-    debugf("SetWindowLongPtrW(hwnd=%x, index=%d, new=%x)\n", hWnd, nIndex, dwNewLong);
+    debugf("SetWindowLongPtrW(hwnd=%p, index=%d, new=0x%zx)\n", hWnd, nIndex, dwNewLong);
     if (nIndex == GWLP_WNDPROC && g_originalWndProcs.count(hWnd)) {
         WNDPROC origWndProc = g_originalWndProcs[hWnd];
         g_originalWndProcs[hWnd] = (WNDPROC)dwNewLong;
@@ -492,7 +506,7 @@ AT_GetWindowLongWHook(
     HWND hWnd,
     int nIndex)
 {
-    debugf("GetWindowLongW(hwnd=%x, index=%d)\n", hWnd, nIndex);
+    debugf("GetWindowLongW(hwnd=%p, index=%d)\n", hWnd, nIndex);
     if (nIndex == GWL_WNDPROC && g_originalWndProcs.count(hWnd)) {
         return (LONG)g_originalWndProcs[hWnd];
     }
@@ -507,7 +521,7 @@ AT_SetWindowLongWHook(
     int nIndex,
     LONG dwNewLong)
 {
-    debugf("SetWindowLongW(hwnd=%x, index=%d, new=%x)\n", hWnd, nIndex, dwNewLong);
+    debugf("SetWindowLongW(hwnd=%p, index=%d, new=0x%x)\n", hWnd, nIndex, dwNewLong);
     if (nIndex == GWL_WNDPROC && g_originalWndProcs.count(hWnd)) {
         WNDPROC origWndProc = g_originalWndProcs[hWnd];
         g_originalWndProcs[hWnd] = (WNDPROC)dwNewLong;
@@ -539,7 +553,7 @@ AT_CreateWindowExWHook(
         dwExStyle, lpClassName, lpWindowName, dwStyle,
         X, Y, nWidth, nHeight,
         hWndParent, hMenu, hInstance, lpParam);
-    debugf("CreateWindowExW() -> hwnd=%x\n", hWnd);
+    debugf("CreateWindowExW() -> hwnd=%p\n", hWnd);
     WNDPROC origWndProc;
 #if _WIN64
     origWndProc = (WNDPROC)g_originalSetWindowLongPtrW(hWnd, GWLP_WNDPROC, (LONG_PTR)AT_WndProcHook);
