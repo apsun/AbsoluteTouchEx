@@ -20,7 +20,7 @@ public:
 
     }
 
-    DWORD code()
+    DWORD code() const
     {
         return m_errorCode;
     }

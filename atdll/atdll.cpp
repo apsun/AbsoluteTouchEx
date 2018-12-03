@@ -9,6 +9,7 @@
 #include "detours.h"
 
 #define DEBUG_MODE 1
+#define HID_USAGE_DIGITIZER_CONTACT_ID 0x51
 #define HID_USAGE_DIGITIZER_CONTACT_COUNT 0x54
 #define MAGIC_HANDLE ((HRAWINPUT)0)
 
@@ -59,18 +60,32 @@ private:
 // Wrapper for malloc with unique_ptr semantics, to allow
 // for variable-sized structures.
 struct free_deleter { void operator()(void *ptr) { free(ptr); } };
-template<class T> using malloc_ptr = std::unique_ptr<T, free_deleter>;
+template<typename T> using malloc_ptr = std::unique_ptr<T, free_deleter>;
+
+// Contact information parsed from the HID report descriptor.
+struct at_contact_info
+{
+    USHORT link;
+    RECT touchArea;
+};
+
+// The data for a touch event.
+struct at_contact
+{
+    at_contact_info info;
+    ULONG id;
+    LONG x;
+    LONG y;
+};
 
 // Device information, such as touch area bounds and HID offsets.
 // This can be reused across HID events, so we only have to parse
 // this info once.
 struct at_device_info
 {
-    malloc_ptr<_HIDP_PREPARSED_DATA> preparsedData;
-    RECT touchArea;
-    int linkX;
-    int linkY;
-    int linkTouches;
+    malloc_ptr<_HIDP_PREPARSED_DATA> preparsedData; // HID internal data
+    USHORT linkContactCount; // Link collection for number of contacts present
+    std::vector<at_contact_info> contactInfo; // Link collection and touch area for each contact
 };
 
 // Hook trampolines
@@ -92,6 +107,9 @@ static std::unordered_map<HANDLE, at_device_info> g_devices;
 
 // Holds the injected mouse input to be consumed by the real WndProc()
 static thread_local RAWINPUT t_injectedInput;
+
+// Holds the current primary touch point ID
+static thread_local ULONG t_primaryContactID;
 
 // Allocates a malloc_ptr with the given size. The size must be
 // greater than or equal to sizeof(T).
@@ -158,6 +176,27 @@ AT_GetHidPreparsedData(RAWINPUTHEADER hdr)
     return preparsedData;
 }
 
+// Returns all input button caps for the given preparsed
+// HID report descriptor.
+static std::vector<HIDP_BUTTON_CAPS>
+AT_GetHidInputButtonCaps(PHIDP_PREPARSED_DATA preparsedData)
+{
+    NTSTATUS status;
+    HIDP_CAPS caps;
+    status = HidP_GetCaps(preparsedData, &caps);
+    if (status != HIDP_STATUS_SUCCESS) {
+        throw hid_error(status);
+    }
+    USHORT numCaps = caps.NumberInputButtonCaps;
+    std::vector<HIDP_BUTTON_CAPS> buttonCaps(numCaps);
+    status = HidP_GetButtonCaps(HidP_Input, &buttonCaps[0], &numCaps, preparsedData);
+    if (status != HIDP_STATUS_SUCCESS) {
+        throw hid_error(status);
+    }
+    buttonCaps.resize(numCaps);
+    return buttonCaps;
+}
+
 // Returns all input value caps for the given preparsed
 // HID report descriptor.
 static std::vector<HIDP_VALUE_CAPS>
@@ -169,17 +208,51 @@ AT_GetHidInputValueCaps(PHIDP_PREPARSED_DATA preparsedData)
     if (status != HIDP_STATUS_SUCCESS) {
         throw hid_error(status);
     }
-    std::vector<HIDP_VALUE_CAPS> valueCaps(caps.NumberInputValueCaps);
-    status = HidP_GetValueCaps(HidP_Input, &valueCaps[0], &caps.NumberInputValueCaps, preparsedData);
+    USHORT numCaps = caps.NumberInputValueCaps;
+    std::vector<HIDP_VALUE_CAPS> valueCaps(numCaps);
+    status = HidP_GetValueCaps(HidP_Input, &valueCaps[0], &numCaps, preparsedData);
     if (status != HIDP_STATUS_SUCCESS) {
         throw hid_error(status);
     }
+    valueCaps.resize(numCaps);
     return valueCaps;
 }
 
-// Reads a single HID report value.
+// Reads the pressed status of a single HID report button.
+static bool
+AT_GetHidUsageButton(
+    HIDP_REPORT_TYPE reportType,
+    USAGE usagePage,
+    USHORT linkCollection,
+    USAGE usage,
+    PHIDP_PREPARSED_DATA preparsedData,
+    PBYTE report,
+    ULONG reportLen)
+{
+    ULONG numUsages = HidP_MaxUsageListLength(
+        reportType,
+        usagePage,
+        preparsedData);
+    std::vector<USAGE> usages(numUsages);
+    NTSTATUS status = HidP_GetUsages(
+        reportType,
+        usagePage,
+        linkCollection,
+        &usages[0],
+        &numUsages,
+        preparsedData,
+        (PCHAR)report,
+        reportLen);
+    if (status != HIDP_STATUS_SUCCESS) {
+        throw hid_error(status);
+    }
+    usages.resize(numUsages);
+    return std::find(usages.begin(), usages.end(), usage) != usages.end();
+}
+
+// Reads a single HID report value in logical units.
 static ULONG
-AT_GetHidUsageValue(
+AT_GetHidUsageLogicalValue(
     HIDP_REPORT_TYPE reportType,
     USAGE usagePage,
     USHORT linkCollection,
@@ -190,7 +263,34 @@ AT_GetHidUsageValue(
 {
     ULONG value;
     NTSTATUS status = HidP_GetUsageValue(
-        HidP_Input,
+        reportType,
+        usagePage,
+        linkCollection,
+        usage,
+        &value,
+        preparsedData,
+        (PCHAR)report,
+        reportLen);
+    if (status != HIDP_STATUS_SUCCESS) {
+        throw hid_error(status);
+    }
+    return value;
+}
+
+// Reads a single HID report value in physical units.
+static LONG
+AT_GetHidUsagePhysicalValue(
+    HIDP_REPORT_TYPE reportType,
+    USAGE usagePage,
+    USHORT linkCollection,
+    USAGE usage,
+    PHIDP_PREPARSED_DATA preparsedData,
+    PBYTE report,
+    ULONG reportLen)
+{
+    LONG value;
+    NTSTATUS status = HidP_GetScaledUsageValue(
+        reportType,
         usagePage,
         linkCollection,
         usage,
@@ -248,41 +348,172 @@ AT_GetDeviceInfo(RAWINPUTHEADER hdr)
         return g_devices[hdr.hDevice];
     }
     
-    at_device_info &dev = g_devices[hdr.hDevice];
-    dev.linkX = -1;
-    dev.linkY = -1;
-    dev.linkTouches = -1;
+    at_device_info dev;
     dev.preparsedData = AT_GetHidPreparsedData(hdr);
 
-    std::vector<HIDP_VALUE_CAPS> valueCaps = AT_GetHidInputValueCaps(dev.preparsedData.get());
-    for (const HIDP_VALUE_CAPS &cap : valueCaps) {
-        if (dev.linkTouches < 0 &&
-            !cap.IsRange &&
-            cap.UsagePage == HID_USAGE_PAGE_DIGITIZER &&
-            cap.NotRange.Usage == HID_USAGE_DIGITIZER_CONTACT_COUNT) {
-            dev.linkTouches = cap.LinkCollection;
-        } else if (!cap.IsRange && cap.IsAbsolute && cap.UsagePage == HID_USAGE_PAGE_GENERIC) {
-            if (dev.linkX < 0 && cap.NotRange.Usage == HID_USAGE_GENERIC_X) {
-                dev.touchArea.left = cap.LogicalMin;
-                dev.touchArea.right = cap.LogicalMax;
-                dev.linkX = cap.LinkCollection;
-            } else if (dev.linkY < 0 && cap.NotRange.Usage == HID_USAGE_GENERIC_Y) {
-                dev.touchArea.top = cap.LogicalMin;
-                dev.touchArea.bottom = cap.LogicalMax;
-                dev.linkY = cap.LinkCollection;
+    // Struct to hold our parser state
+    struct at_contact_info_tmp
+    {
+        bool hasContactID = false;
+        bool hasTip = false;
+        bool hasX = false;
+        bool hasY = false;
+        RECT touchArea;
+    };
+    std::unordered_map<USHORT, at_contact_info_tmp> contacts;
+
+    // Get the touch area for all the contacts. Also make sure that each one
+    // is actually a contact, as specified by:
+    // https://docs.microsoft.com/en-us/windows-hardware/design/component-guidelines/windows-precision-touchpad-required-hid-top-level-collections
+    for (const HIDP_VALUE_CAPS &cap : AT_GetHidInputValueCaps(dev.preparsedData.get())) {
+        if (cap.IsRange || !cap.IsAbsolute) {
+            continue;
+        }
+
+        at_contact_info_tmp &info = contacts[cap.LinkCollection];
+
+        if (cap.UsagePage == HID_USAGE_PAGE_DIGITIZER) {
+            if (cap.NotRange.Usage == HID_USAGE_DIGITIZER_CONTACT_COUNT) {
+                dev.linkContactCount = cap.LinkCollection;
             }
         }
 
-        if (dev.linkX >= 0 && dev.linkY >= 0 && dev.linkTouches >= 0) {
-            break;
+        if (cap.UsagePage == HID_USAGE_PAGE_GENERIC) {
+            if (cap.NotRange.Usage == HID_USAGE_GENERIC_X) {
+                info.touchArea.left = cap.PhysicalMin;
+                info.touchArea.right = cap.PhysicalMax;
+                info.hasX = true;
+            } else if (cap.NotRange.Usage == HID_USAGE_GENERIC_Y) {
+                info.touchArea.top = cap.PhysicalMin;
+                info.touchArea.bottom = cap.PhysicalMax;
+                info.hasY = true;
+            }
+        } else if (cap.UsagePage == HID_USAGE_PAGE_DIGITIZER) {
+            if (cap.NotRange.Usage == HID_USAGE_DIGITIZER_CONTACT_ID) {
+                info.hasContactID = true;
+            }
         }
     }
 
-    if (dev.linkX < 0 || dev.linkY < 0 || dev.linkTouches < 0) {
-        throw std::runtime_error("Usage for X/Y/contact count not found");
+    for (const HIDP_BUTTON_CAPS &cap : AT_GetHidInputButtonCaps(dev.preparsedData.get())) {
+        at_contact_info_tmp &info = contacts[cap.LinkCollection];
+
+        if (cap.UsagePage == HID_USAGE_PAGE_DIGITIZER) {
+            if (cap.NotRange.Usage == HID_USAGE_DIGITIZER_TIP_SWITCH) {
+                info.hasTip = true;
+            }
+        }
     }
 
-    return dev;
+    for (auto &kvp : contacts) {
+        USHORT link = kvp.first;
+        at_contact_info_tmp &info = kvp.second;
+        if (info.hasContactID && info.hasTip && info.hasX && info.hasY) {
+            debugf("Contact for device %p: link=%d, touchArea={%d,%d,%d,%d}\n",
+                hdr.hDevice,
+                link,
+                info.touchArea.left,
+                info.touchArea.top,
+                info.touchArea.right,
+                info.touchArea.bottom);
+            dev.contactInfo.push_back({ link, info.touchArea });
+        }
+    }
+
+    return g_devices[hdr.hDevice] = std::move(dev);
+}
+
+// Reads all touch contact points from a raw input event.
+static std::vector<at_contact>
+AT_GetContacts(at_device_info &dev, RAWINPUT *input)
+{
+    std::vector<at_contact> contacts;
+
+    DWORD sizeHid = input->data.hid.dwSizeHid;
+    DWORD count = input->data.hid.dwCount;
+    BYTE *rawData = input->data.hid.bRawData;
+    if (count == 0) {
+        return contacts;
+    }
+
+    ULONG numContacts = AT_GetHidUsageLogicalValue(
+        HidP_Input,
+        HID_USAGE_PAGE_DIGITIZER,
+        dev.linkContactCount,
+        HID_USAGE_DIGITIZER_CONTACT_COUNT,
+        dev.preparsedData.get(),
+        rawData,
+        sizeHid);
+    
+    if (numContacts > dev.contactInfo.size()) {
+        throw std::runtime_error("Device reported more contacts than we have links");
+    }
+
+    // It's a little ambiguous as to whether contact count includes
+    // released contacts. I interpreted the specs as a yes, but this
+    // may require additional testing.
+    for (ULONG i = 0; i < numContacts; ++i) {
+        at_contact_info &info = dev.contactInfo[i];
+        bool tip = AT_GetHidUsageButton(
+            HidP_Input,
+            HID_USAGE_PAGE_DIGITIZER,
+            info.link,
+            HID_USAGE_DIGITIZER_TIP_SWITCH,
+            dev.preparsedData.get(),
+            rawData,
+            sizeHid);
+        
+        if (!tip) {
+            continue;
+        }
+
+        ULONG id = AT_GetHidUsageLogicalValue(
+            HidP_Input,
+            HID_USAGE_PAGE_DIGITIZER,
+            info.link,
+            HID_USAGE_DIGITIZER_CONTACT_ID,
+            dev.preparsedData.get(),
+            rawData,
+            sizeHid);
+
+        LONG x = AT_GetHidUsagePhysicalValue(
+            HidP_Input,
+            HID_USAGE_PAGE_GENERIC,
+            info.link,
+            HID_USAGE_GENERIC_X,
+            dev.preparsedData.get(),
+            rawData,
+            sizeHid);
+
+        LONG y = AT_GetHidUsagePhysicalValue(
+            HidP_Input,
+            HID_USAGE_PAGE_GENERIC,
+            info.link,
+            HID_USAGE_GENERIC_Y,
+            dev.preparsedData.get(),
+            rawData,
+            sizeHid);
+
+        contacts.push_back({ info, id, x, y });
+    }
+
+    return contacts;
+}
+
+// Returns the primary contact for a given list of contacts. This is
+// necessary since we are mapping potentially many touches to a single
+// mouse position. Currently this just stores a global contact ID and
+// uses that as the primary contact.
+static at_contact
+AT_GetPrimaryContact(const std::vector<at_contact> &contacts)
+{
+    for (at_contact contact : contacts) {
+        if (contact.id == t_primaryContactID) {
+            return contact;
+        }
+    }
+    t_primaryContactID = contacts[0].id;
+    return contacts[0];
 }
 
 // Handles a WM_INPUT event. May update wParam/lParam to be delivered
@@ -295,53 +526,30 @@ AT_HandleRawInput(WPARAM *wParam, LPARAM *lParam)
     HRAWINPUT hInput = (HRAWINPUT)*lParam;
     RAWINPUTHEADER hdr = AT_GetRawInputHeader(hInput);
     if (hdr.dwType != RIM_TYPEHID) {
+        // Suppress mouse input events to prevent it from getting
+        // mixed in with our absolute movement events. Unfortunately
+        // this has the side effect of disabling all non-touchpad
+        // input. One solution might be to determine the device that
+        // sent the event and check if it's also a touchpad, and only
+        // filter out events from such devices.
+        if (hdr.dwType == RIM_TYPEMOUSE) {
+            return true;
+        }
         return false;
     }
     
     at_device_info &dev = AT_GetDeviceInfo(hdr);
     malloc_ptr<RAWINPUT> input = AT_GetRawInput(hInput, hdr);
-    DWORD sizeHid = input->data.hid.dwSizeHid;
-    DWORD count = input->data.hid.dwCount;
-    BYTE *rawData = input->data.hid.bRawData;
-    if (count == 0) {
+    std::vector<at_contact> contacts = AT_GetContacts(dev, input.get());
+    if (contacts.size() == 0) {
         return true;
     }
 
-    ULONG numTouches = AT_GetHidUsageValue(
-        HidP_Input,
-        HID_USAGE_PAGE_DIGITIZER,
-        dev.linkTouches,
-        HID_USAGE_DIGITIZER_CONTACT_COUNT,
-        dev.preparsedData.get(),
-        rawData,
-        sizeHid);
-    
-    if (numTouches == 0) {
-        return true;
-    }
-
-    ULONG x = AT_GetHidUsageValue(
-        HidP_Input,
-        HID_USAGE_PAGE_GENERIC,
-        dev.linkX,
-        HID_USAGE_GENERIC_X,
-        dev.preparsedData.get(),
-        rawData,
-        sizeHid);
-
-    ULONG y = AT_GetHidUsageValue(
-        HidP_Input,
-        HID_USAGE_PAGE_GENERIC,
-        dev.linkY,
-        HID_USAGE_GENERIC_Y,
-        dev.preparsedData.get(),
-        rawData,
-        sizeHid);
-
+    at_contact contact = AT_GetPrimaryContact(contacts);
     POINT touchpadPoint;
-    touchpadPoint.x = x;
-    touchpadPoint.y = y;
-    POINT screenPoint = AT_TouchpadToScreen(dev.touchArea, touchpadPoint);
+    touchpadPoint.x = contact.x;
+    touchpadPoint.y = contact.y;
+    POINT screenPoint = AT_TouchpadToScreen(contact.info.touchArea, touchpadPoint);
 
     t_injectedInput.header.dwType = RIM_TYPEMOUSE;
     t_injectedInput.header.dwSize = sizeof(RAWINPUT);
@@ -417,8 +625,12 @@ AT_WndProcHook(
     WPARAM wParam,
     LPARAM lParam)
 {
+    // Intercept and discard normal mouse movement messages
+    if (message == WM_MOUSEMOVE) {
+        return DefWindowProcW(hWnd, message, wParam, lParam);
+    }
+
     if (message == WM_INPUT) {
-        debugf("WndProc(hwnd=%p, message=WM_INPUT)\n", hWnd);
         bool handled = false;
         try {
             handled = AT_HandleRawInput(&wParam, &lParam);
@@ -433,9 +645,8 @@ AT_WndProcHook(
             debugf("AT_WndProcHook: handled WM_INPUT\n");
             return DefWindowProcW(hWnd, message, wParam, lParam);
         }
-    } else {
-        debugf("WndProc(hwnd=%p, message=%u)\n", hWnd, message);
     }
+
     return CallWindowProcW(g_originalWndProcs[hWnd], hWnd, message, wParam, lParam);
 }
 
@@ -473,7 +684,6 @@ AT_GetWindowLongPtrWHook(
     HWND hWnd,
     int nIndex)
 {
-    debugf("GetWindowLongPtrW(hwnd=%p, index=%d)\n", hWnd, nIndex);
     if (nIndex == GWLP_WNDPROC && g_originalWndProcs.count(hWnd)) {
         return (LONG_PTR)g_originalWndProcs[hWnd];
     }
@@ -488,7 +698,6 @@ AT_SetWindowLongPtrWHook(
     int nIndex,
     LONG_PTR dwNewLong)
 {
-    debugf("SetWindowLongPtrW(hwnd=%p, index=%d, new=0x%zx)\n", hWnd, nIndex, dwNewLong);
     if (nIndex == GWLP_WNDPROC && g_originalWndProcs.count(hWnd)) {
         WNDPROC origWndProc = g_originalWndProcs[hWnd];
         g_originalWndProcs[hWnd] = (WNDPROC)dwNewLong;
@@ -506,7 +715,6 @@ AT_GetWindowLongWHook(
     HWND hWnd,
     int nIndex)
 {
-    debugf("GetWindowLongW(hwnd=%p, index=%d)\n", hWnd, nIndex);
     if (nIndex == GWL_WNDPROC && g_originalWndProcs.count(hWnd)) {
         return (LONG)g_originalWndProcs[hWnd];
     }
@@ -521,7 +729,6 @@ AT_SetWindowLongWHook(
     int nIndex,
     LONG dwNewLong)
 {
-    debugf("SetWindowLongW(hwnd=%p, index=%d, new=0x%x)\n", hWnd, nIndex, dwNewLong);
     if (nIndex == GWL_WNDPROC && g_originalWndProcs.count(hWnd)) {
         WNDPROC origWndProc = g_originalWndProcs[hWnd];
         g_originalWndProcs[hWnd] = (WNDPROC)dwNewLong;

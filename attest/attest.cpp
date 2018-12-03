@@ -20,7 +20,7 @@ public:
 
     }
 
-    DWORD code()
+    DWORD code() const
     {
         return m_errorCode;
     }
@@ -32,7 +32,7 @@ private:
 // Wrapper for malloc with unique_ptr semantics, to allow
 // for variable-sized structures.
 struct free_deleter { void operator()(void *ptr) { free(ptr); } };
-template<class T> using malloc_ptr = std::unique_ptr<T, free_deleter>;
+template<typename T> using malloc_ptr = std::unique_ptr<T, free_deleter>;
 
 // Allocates a malloc_ptr with the given size. The size must be
 // greater than or equal to sizeof(T).
