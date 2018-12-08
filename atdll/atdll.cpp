@@ -74,8 +74,7 @@ struct at_contact
 {
     at_contact_info info;
     ULONG id;
-    LONG x;
-    LONG y;
+    POINT point;
 };
 
 // Device information, such as touch area bounds and HID offsets.
@@ -370,8 +369,6 @@ AT_GetDeviceInfo(RAWINPUTHEADER hdr)
             continue;
         }
 
-        at_contact_info_tmp &info = contacts[cap.LinkCollection];
-
         if (cap.UsagePage == HID_USAGE_PAGE_DIGITIZER) {
             if (cap.NotRange.Usage == HID_USAGE_DIGITIZER_CONTACT_COUNT) {
                 dev.linkContactCount = cap.LinkCollection;
@@ -380,27 +377,25 @@ AT_GetDeviceInfo(RAWINPUTHEADER hdr)
 
         if (cap.UsagePage == HID_USAGE_PAGE_GENERIC) {
             if (cap.NotRange.Usage == HID_USAGE_GENERIC_X) {
-                info.touchArea.left = cap.PhysicalMin;
-                info.touchArea.right = cap.PhysicalMax;
-                info.hasX = true;
+                contacts[cap.LinkCollection].touchArea.left = cap.PhysicalMin;
+                contacts[cap.LinkCollection].touchArea.right = cap.PhysicalMax;
+                contacts[cap.LinkCollection].hasX = true;
             } else if (cap.NotRange.Usage == HID_USAGE_GENERIC_Y) {
-                info.touchArea.top = cap.PhysicalMin;
-                info.touchArea.bottom = cap.PhysicalMax;
-                info.hasY = true;
+                contacts[cap.LinkCollection].touchArea.top = cap.PhysicalMin;
+                contacts[cap.LinkCollection].touchArea.bottom = cap.PhysicalMax;
+                contacts[cap.LinkCollection].hasY = true;
             }
         } else if (cap.UsagePage == HID_USAGE_PAGE_DIGITIZER) {
             if (cap.NotRange.Usage == HID_USAGE_DIGITIZER_CONTACT_ID) {
-                info.hasContactID = true;
+                contacts[cap.LinkCollection].hasContactID = true;
             }
         }
     }
 
     for (const HIDP_BUTTON_CAPS &cap : AT_GetHidInputButtonCaps(dev.preparsedData.get())) {
-        at_contact_info_tmp &info = contacts[cap.LinkCollection];
-
         if (cap.UsagePage == HID_USAGE_PAGE_DIGITIZER) {
             if (cap.NotRange.Usage == HID_USAGE_DIGITIZER_TIP_SWITCH) {
-                info.hasTip = true;
+                contacts[cap.LinkCollection].hasTip = true;
             }
         }
     }
@@ -494,7 +489,7 @@ AT_GetContacts(at_device_info &dev, RAWINPUT *input)
             rawData,
             sizeHid);
 
-        contacts.push_back({ info, id, x, y });
+        contacts.push_back({ info, id, { x, y } });
     }
 
     return contacts;
@@ -546,10 +541,7 @@ AT_HandleRawInput(WPARAM *wParam, LPARAM *lParam)
     }
 
     at_contact contact = AT_GetPrimaryContact(contacts);
-    POINT touchpadPoint;
-    touchpadPoint.x = contact.x;
-    touchpadPoint.y = contact.y;
-    POINT screenPoint = AT_TouchpadToScreen(contact.info.touchArea, touchpadPoint);
+    POINT screenPoint = AT_TouchpadToScreen(contact.info.touchArea, contact.point);
 
     t_injectedInput.header.dwType = RIM_TYPEMOUSE;
     t_injectedInput.header.dwSize = sizeof(RAWINPUT);
