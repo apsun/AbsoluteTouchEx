@@ -1,9 +1,8 @@
 # AbsoluteTouchEx
 
-AbsoluteTouchEx is the next generation of
-[AbsoluteTouch](https://github.com/apsun/AbsoluteTouch).
-Ever wanted to use your laptop touchpad to play osu!?
-Well, now you can!
+AbsoluteTouchEx lets you use your touchpad like a touchscreen, giving you
+absolute cursor movement just like you would get on a tablet. It is the
+next generation of [AbsoluteTouch](https://github.com/apsun/AbsoluteTouch).
 
 This project solves two major shortcomings of AbsoluteTouch:
 
@@ -38,7 +37,8 @@ atloader.exe %LocalAppData%\osu!\osu!.exe
 ```
 
 Initially at program startup, absolute touch mode will be disabled.
-You can toggle it on and off by pressing `SHIFT + F6`.
+You can toggle it on and off by pressing `SHIFT + F6`. Make sure to enable
+raw input mode; AbsoluteTouchEx will not work without it.
 
 ## Building the project
 
