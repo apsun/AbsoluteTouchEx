@@ -8,10 +8,21 @@
 #include <hidusage.h>
 #include "detours.h"
 
+// Whether to create the debug output window
 #define DEBUG_MODE 1
+
+// HID usages that are not already defined
 #define HID_USAGE_DIGITIZER_CONTACT_ID 0x51
 #define HID_USAGE_DIGITIZER_CONTACT_COUNT 0x54
+
+// Handle that we give to the real WM_INPUT handler to signify
+// that they should read our injected input.
 #define MAGIC_HANDLE ((HRAWINPUT)0)
+
+// Hotkey for the global toggle
+#define HOTKEY_ID 0xCAFE
+#define HOTKEY_MOD (MOD_SHIFT)
+#define HOTKEY_VK VK_F6
 
 // C++ exception wrapping the Win32 GetLastError() status
 class win32_error : std::exception
@@ -107,6 +118,9 @@ static std::unordered_map<HWND, WNDPROC> g_originalWndProcs;
 
 // Caches per-device info for better performance
 static std::unordered_map<HANDLE, at_device_info> g_devices;
+
+// Whether absolute input mode is enabled
+static bool g_enabled;
 
 // Holds the injected mouse input to be consumed by the real WndProc()
 static thread_local RAWINPUT t_injectedInput;
@@ -621,25 +635,32 @@ AT_WndProcHook(
     WPARAM wParam,
     LPARAM lParam)
 {
-    // Intercept and discard normal mouse movement messages
-    if (message == WM_MOUSEMOVE) {
-        return DefWindowProcW(hWnd, message, wParam, lParam);
+    if (message == WM_HOTKEY && wParam == HOTKEY_ID) {
+        g_enabled = !g_enabled;
+        debugf("Absolute touch mode -> %s\n", g_enabled ? "ON" : "OFF");
+        return 0;
     }
 
-    if (message == WM_INPUT) {
-        bool handled = false;
-        try {
-            handled = AT_HandleRawInput(&wParam, &lParam);
-        } catch (const win32_error &e) {
-            debugf("WndProc: win32_error(0x%x)\n", e.code());
-        } catch (const hid_error &e) {
-            debugf("WndProc: hid_error(0x%x)\n", e.code());
-        } catch (const std::runtime_error &e) {
-            debugf("WndProc: runtime_error(%s)\n", e.what());
+    if (g_enabled) {
+        if (message == WM_MOUSEMOVE) {
+            return 0;
         }
-        if (handled) {
-            debugf("AT_WndProcHook: handled WM_INPUT\n");
-            return DefWindowProcW(hWnd, message, wParam, lParam);
+
+        if (message == WM_INPUT) {
+            bool handled = false;
+            try {
+                handled = AT_HandleRawInput(&wParam, &lParam);
+            } catch (const win32_error &e) {
+                debugf("WndProc: win32_error(0x%x)\n", e.code());
+            } catch (const hid_error &e) {
+                debugf("WndProc: hid_error(0x%x)\n", e.code());
+            } catch (const std::runtime_error &e) {
+                debugf("WndProc: runtime_error(%s)\n", e.what());
+            }
+            if (handled) {
+                debugf("AT_WndProcHook: handled WM_INPUT\n");
+                return 0;
+            }
         }
     }
 
@@ -660,8 +681,16 @@ AT_RegisterRawInputDevicesHook(
         pRawInputDevices[0].usUsagePage == HID_USAGE_PAGE_GENERIC &&
         pRawInputDevices[0].usUsage == HID_USAGE_GENERIC_MOUSE) {
         debugf("RegisterRawInputDevices(mouse)\n");
+
+        HWND hWnd = pRawInputDevices[0].hwndTarget;
+
+        // Register hotkey here since we only want to do this once, and generally
+        // chances are that only one window will be receiving raw input. Ignore errors.
+        // This is a bit ugly, but it works well enough for our purposes.
+        RegisterHotKey(hWnd, HOTKEY_ID, HOTKEY_MOD, HOTKEY_VK);
+
         try {
-            AT_RegisterTouchpadInput(pRawInputDevices[0].hwndTarget);
+            AT_RegisterTouchpadInput(hWnd);
         } catch (const win32_error &e) {
             debugf("RegisterRawInputDevices: win32_error(0x%x)\n", e.code());
         }
@@ -756,7 +785,7 @@ AT_CreateWindowExWHook(
         dwExStyle, lpClassName, lpWindowName, dwStyle,
         X, Y, nWidth, nHeight,
         hWndParent, hMenu, hInstance, lpParam);
-    debugf("CreateWindowExW() -> hwnd=%p\n", hWnd);
+    debugf("CreateWindowExW() -> hWnd=%p\n", hWnd);
     WNDPROC origWndProc;
 #if _WIN64
     origWndProc = (WNDPROC)g_originalSetWindowLongPtrW(hWnd, GWLP_WNDPROC, (LONG_PTR)AT_WndProcHook);

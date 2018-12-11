@@ -37,7 +37,8 @@ For example, to run osu!:
 atloader.exe %LocalAppData%\osu!\osu!.exe
 ```
 
-AbsoluteTouchEx currently does not have any options.
+Initially at program startup, absolute touch mode will be disabled.
+You can toggle it on and off by pressing `SHIFT + F6`.
 
 ## Building the project
 
@@ -47,3 +48,6 @@ Requirements:
 - Windows SDK and WDK (for HID libraries)
 - [Detours](https://github.com/Microsoft/Detours)
 
+You must build the project in the same bitness as the program you intend
+to inject the DLL into. For example, to inject into a 32-bit program, build
+the project in 32-bit mode.
