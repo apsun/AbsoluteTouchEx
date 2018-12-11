@@ -92,6 +92,10 @@ static decltype(RegisterRawInputDevices) *g_originalRegisterRawInputDevices = Re
 static decltype(CreateWindowExW) *g_originalCreateWindowExW = CreateWindowExW;
 static decltype(GetRawInputData) *g_originalGetRawInputData = GetRawInputData;
 static decltype(RegisterClassExW) *g_originalRegisterClassExW = RegisterClassExW;
+
+// On 32-bit, GetWindowLongPtr is #defined as an alias for GetWindowLong.
+// On 64-bit, GetWindowLong is not available at all. Hence, these two
+// function sets are mutually exclusive.
 #if _WIN64
 static decltype(GetWindowLongPtrW) *g_originalGetWindowLongPtrW = GetWindowLongPtrW;
 static decltype(SetWindowLongPtrW) *g_originalSetWindowLongPtrW = SetWindowLongPtrW;
@@ -324,11 +328,15 @@ AT_RegisterTouchpadInput(HWND hWnd)
 static POINT
 AT_TouchpadToScreen(RECT touchpadRect, POINT touchpadPoint)
 {
-    int tpDeltaX = touchpadPoint.x - touchpadRect.left;
-    int tpDeltaY = touchpadPoint.y - touchpadRect.top;
+    LONG tpDeltaX = touchpadPoint.x - touchpadRect.left;
+    LONG tpDeltaY = touchpadPoint.y - touchpadRect.top;
 
-    int scDeltaX = tpDeltaX * 65535 / (touchpadRect.right - touchpadRect.left);
-    int scDeltaY = tpDeltaY * 65535 / (touchpadRect.bottom - touchpadRect.top);
+    // As per HID spec, maximum is inclusive, so we need to add 1 here
+    LONG scWidth = touchpadRect.right + 1 - touchpadRect.left;
+    LONG scHeight = touchpadRect.bottom + 1 - touchpadRect.top;
+
+    LONG scDeltaX = (tpDeltaX << 16) / scWidth;
+    LONG scDeltaY = (tpDeltaY << 16) / scHeight;
 
     POINT screenPoint;
     screenPoint.x = scDeltaX;
@@ -369,12 +377,6 @@ AT_GetDeviceInfo(RAWINPUTHEADER hdr)
             continue;
         }
 
-        if (cap.UsagePage == HID_USAGE_PAGE_DIGITIZER) {
-            if (cap.NotRange.Usage == HID_USAGE_DIGITIZER_CONTACT_COUNT) {
-                dev.linkContactCount = cap.LinkCollection;
-            }
-        }
-
         if (cap.UsagePage == HID_USAGE_PAGE_GENERIC) {
             if (cap.NotRange.Usage == HID_USAGE_GENERIC_X) {
                 contacts[cap.LinkCollection].touchArea.left = cap.PhysicalMin;
@@ -386,7 +388,9 @@ AT_GetDeviceInfo(RAWINPUTHEADER hdr)
                 contacts[cap.LinkCollection].hasY = true;
             }
         } else if (cap.UsagePage == HID_USAGE_PAGE_DIGITIZER) {
-            if (cap.NotRange.Usage == HID_USAGE_DIGITIZER_CONTACT_ID) {
+            if (cap.NotRange.Usage == HID_USAGE_DIGITIZER_CONTACT_COUNT) {
+                dev.linkContactCount = cap.LinkCollection;
+            } else if (cap.NotRange.Usage == HID_USAGE_DIGITIZER_CONTACT_ID) {
                 contacts[cap.LinkCollection].hasContactID = true;
             }
         }
