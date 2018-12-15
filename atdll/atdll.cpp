@@ -346,11 +346,11 @@ AT_TouchpadToScreen(RECT touchpadRect, POINT touchpadPoint)
     LONG tpDeltaY = touchpadPoint.y - touchpadRect.top;
 
     // As per HID spec, maximum is inclusive, so we need to add 1 here
-    LONG scWidth = touchpadRect.right + 1 - touchpadRect.left;
-    LONG scHeight = touchpadRect.bottom + 1 - touchpadRect.top;
+    LONG tpWidth = touchpadRect.right + 1 - touchpadRect.left;
+    LONG tpHeight = touchpadRect.bottom + 1 - touchpadRect.top;
 
-    LONG scDeltaX = (tpDeltaX << 16) / scWidth;
-    LONG scDeltaY = (tpDeltaY << 16) / scHeight;
+    LONG scDeltaX = (tpDeltaX << 16) / tpWidth;
+    LONG scDeltaY = (tpDeltaY << 16) / tpHeight;
 
     POINT screenPoint;
     screenPoint.x = scDeltaX;
