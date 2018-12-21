@@ -100,9 +100,8 @@ struct at_device_info
 
 // Hook trampolines
 static decltype(RegisterRawInputDevices) *g_originalRegisterRawInputDevices = RegisterRawInputDevices;
-static decltype(CreateWindowExW) *g_originalCreateWindowExW = CreateWindowExW;
 static decltype(GetRawInputData) *g_originalGetRawInputData = GetRawInputData;
-static decltype(RegisterClassExW) *g_originalRegisterClassExW = RegisterClassExW;
+static decltype(CreateWindowExW) *g_originalCreateWindowExW = CreateWindowExW;
 
 // On 32-bit, GetWindowLongPtr is #defined as an alias for GetWindowLong.
 // On 64-bit, GetWindowLong is not available at all. Hence, these two
