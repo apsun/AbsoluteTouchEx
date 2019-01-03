@@ -25,16 +25,31 @@ you are banned for using AbsoluteTouchEx.
 
 ## Running the project
 
-Make sure you have the Visual C++ 2017 Redistributable installed. You can
-download the 32-bit version [here](https://aka.ms/vs/15/release/vc_redist.x86.exe)
-and the 64-bit version [here](https://aka.ms/vs/15/release/vc_redist.x64.exe).
+Requirements:
 
-Choose the correct bitness of AbsoluteTouchEx to run. You must run the
+- Windows 10
+- Windows precision touchpad drivers
+
+Ensure that your computer is using a Windows precision touchpad by going
+to Settings -> Devices -> Touchpad. If your touchpad has precision
+drivers installed, you should see "Your PC has a precision touchpad." at
+the top. **If you do not see this message, AbsoluteTouchEx will not work.**
+
+Download the AbsoluteTouchEx executable from the
+[releases page](https://github.com/apsun/AbsoluteTouchEx/releases).
+
+Choose the correct version of AbsoluteTouchEx to run. You must run the
 version with the same bitness as the program that you are injecting it
 into, NOT the bitness of your operating system! x86 is for 32-bit programs
 and x64 is for 64-bit programs.
 
-Ensure `atloader.exe` and `atdll.dll` are in the same directory, then
+Make sure you have the Visual C++ 2017 Redistributable installed (again,
+for the bitness version that you intend to run, not for the bitness of
+your operating system). You can download the 32-bit version
+[here](https://aka.ms/vs/15/release/vc_redist.x86.exe) and the 64-bit
+version [here](https://aka.ms/vs/15/release/vc_redist.x64.exe).
+
+Extract `atloader.exe` and `atdll.dll` to the same directory, then
 run the following command:
 ```
 atloader.exe <path to exe to load>
@@ -54,7 +69,7 @@ raw input mode; AbsoluteTouchEx will not work without it.
 Requirements:
 
 - Visual Studio 2017
-- Windows SDK and WDK (for HID libraries)
+- Windows 10 SDK and WDK (for HID libraries)
 - [Detours](https://github.com/Microsoft/Detours)
 
 The project should open and build with no configuration necessary, assuming
