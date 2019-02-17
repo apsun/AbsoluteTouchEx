@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <exception>
 #include <memory>
 #include <unordered_map>
@@ -147,8 +148,9 @@ debugf(const char *fmt, ...)
 #if DEBUG_MODE
     va_list args;
     va_start(args, fmt);
-    vprintf(fmt, args);
+    vfprintf(stderr, fmt, args);
     va_end(args);
+    putc('\n', stderr);
 #endif
 }
 
@@ -176,17 +178,49 @@ AT_GetRawInput(HRAWINPUT hInput, RAWINPUTHEADER hdr)
     return input;
 }
 
+// Gets a list of raw input devices attached to the system.
+static std::vector<RAWINPUTDEVICELIST>
+AT_GetRawInputDeviceList()
+{
+    std::vector<RAWINPUTDEVICELIST> devices(64);
+    while (true) {
+        UINT numDevices = devices.size();
+        UINT ret = GetRawInputDeviceList(&devices[0], &numDevices, sizeof(RAWINPUTDEVICELIST));
+        if (ret != (UINT)-1) {
+            devices.resize(ret);
+            return devices;
+        } else if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+            devices.resize(numDevices);
+        } else {
+            throw win32_error();
+        }
+    }
+}
+
+// Gets info about a raw input device.
+static RID_DEVICE_INFO
+AT_GetRawInputDeviceInfo(HANDLE hDevice)
+{
+    RID_DEVICE_INFO info;
+    info.cbSize = sizeof(RID_DEVICE_INFO);
+    UINT size = sizeof(RID_DEVICE_INFO);
+    if (GetRawInputDeviceInfoW(hDevice, RIDI_DEVICEINFO, &info, &size) == (UINT)-1) {
+        throw win32_error();
+    }
+    return info;
+}
+
 // Reads the preparsed HID report descriptor for the device
 // that generated the given raw input.
 static malloc_ptr<_HIDP_PREPARSED_DATA>
-AT_GetHidPreparsedData(RAWINPUTHEADER hdr)
+AT_GetHidPreparsedData(HANDLE hDevice)
 {
     UINT size;
-    if (GetRawInputDeviceInfoW(hdr.hDevice, RIDI_PREPARSEDDATA, nullptr, &size) == (UINT)-1) {
+    if (GetRawInputDeviceInfoW(hDevice, RIDI_PREPARSEDDATA, nullptr, &size) == (UINT)-1) {
         throw win32_error();
     }
     malloc_ptr<_HIDP_PREPARSED_DATA> preparsedData = make_malloc<_HIDP_PREPARSED_DATA>(size);
-    if (GetRawInputDeviceInfoW(hdr.hDevice, RIDI_PREPARSEDDATA, preparsedData.get(), &size) == (UINT)-1) {
+    if (GetRawInputDeviceInfoW(hDevice, RIDI_PREPARSEDDATA, preparsedData.get(), &size) == (UINT)-1) {
         throw win32_error();
     }
     return preparsedData;
@@ -362,14 +396,14 @@ AT_TouchpadToScreen(RECT touchpadRect, POINT touchpadPoint)
 // cached info if available; otherwise parses the HID report descriptor
 // and stores it into the cache.
 static at_device_info &
-AT_GetDeviceInfo(RAWINPUTHEADER hdr)
+AT_GetDeviceInfo(HANDLE hDevice)
 {
-    if (g_devices.count(hdr.hDevice)) {
-        return g_devices[hdr.hDevice];
+    if (g_devices.count(hDevice)) {
+        return g_devices[hDevice];
     }
     
     at_device_info dev;
-    dev.preparsedData = AT_GetHidPreparsedData(hdr);
+    dev.preparsedData = AT_GetHidPreparsedData(hDevice);
 
     // Struct to hold our parser state
     struct at_contact_info_tmp
@@ -417,12 +451,12 @@ AT_GetDeviceInfo(RAWINPUTHEADER hdr)
         }
     }
 
-    for (auto &kvp : contacts) {
+    for (const auto &kvp : contacts) {
         USHORT link = kvp.first;
-        at_contact_info_tmp &info = kvp.second;
+        const at_contact_info_tmp &info = kvp.second;
         if (info.hasContactID && info.hasTip && info.hasX && info.hasY) {
-            debugf("Contact for device %p: link=%d, touchArea={%d,%d,%d,%d}\n",
-                hdr.hDevice,
+            debugf("Contact for device %p: link=%d, touchArea={%d,%d,%d,%d}",
+                hDevice,
                 link,
                 info.touchArea.left,
                 info.touchArea.top,
@@ -432,7 +466,7 @@ AT_GetDeviceInfo(RAWINPUTHEADER hdr)
         }
     }
 
-    return g_devices[hdr.hDevice] = std::move(dev);
+    return g_devices[hDevice] = std::move(dev);
 }
 
 // Reads all touch contact points from a raw input event.
@@ -519,7 +553,7 @@ AT_GetContacts(at_device_info &dev, RAWINPUT *input)
 static at_contact
 AT_GetPrimaryContact(const std::vector<at_contact> &contacts)
 {
-    for (at_contact contact : contacts) {
+    for (const at_contact &contact : contacts) {
         if (contact.id == t_primaryContactID) {
             return contact;
         }
@@ -550,7 +584,7 @@ AT_HandleRawInput(WPARAM *wParam, LPARAM *lParam)
         return false;
     }
     
-    at_device_info &dev = AT_GetDeviceInfo(hdr);
+    at_device_info &dev = AT_GetDeviceInfo(hdr.hDevice);
     malloc_ptr<RAWINPUT> input = AT_GetRawInput(hInput, hdr);
     std::vector<at_contact> contacts = AT_GetContacts(dev, input.get());
     if (contacts.size() == 0) {
@@ -572,7 +606,6 @@ AT_HandleRawInput(WPARAM *wParam, LPARAM *lParam)
     t_injectedInput.data.mouse.lLastY = screenPoint.y;
 
     *lParam = (LPARAM)MAGIC_HANDLE;
-    debugf("AT_HandleRawInput: swizzled handle\n");
     return false;
 }
 
@@ -587,8 +620,6 @@ AT_GetRawInputDataHook(
     PUINT pcbSize,
     UINT cbSizeHeader)
 {
-    debugf("GetRawInputData(handle=%p, command=0x%x)\n", hRawInput, uiCommand);
-
     if (hRawInput != MAGIC_HANDLE) {
         return g_originalGetRawInputData(hRawInput, uiCommand, pData, pcbSize, cbSizeHeader);
     }
@@ -636,7 +667,7 @@ AT_WndProcHook(
 {
     if (message == WM_HOTKEY && wParam == HOTKEY_ID) {
         g_enabled = !g_enabled;
-        debugf("Absolute touch mode -> %s\n", g_enabled ? "ON" : "OFF");
+        debugf("Absolute touch mode -> %s", g_enabled ? "ON" : "OFF");
         return 0;
     }
 
@@ -650,14 +681,13 @@ AT_WndProcHook(
             try {
                 handled = AT_HandleRawInput(&wParam, &lParam);
             } catch (const win32_error &e) {
-                debugf("WndProc: win32_error(0x%x)\n", e.code());
+                debugf("WndProc: win32_error(0x%x)", e.code());
             } catch (const hid_error &e) {
-                debugf("WndProc: hid_error(0x%x)\n", e.code());
+                debugf("WndProc: hid_error(0x%x)", e.code());
             } catch (const std::runtime_error &e) {
-                debugf("WndProc: runtime_error(%s)\n", e.what());
+                debugf("WndProc: runtime_error(%s)", e.what());
             }
             if (handled) {
-                debugf("AT_WndProcHook: handled WM_INPUT\n");
                 return 0;
             }
         }
@@ -679,7 +709,7 @@ AT_RegisterRawInputDevicesHook(
     if (uiNumDevices > 0 &&
         pRawInputDevices[0].usUsagePage == HID_USAGE_PAGE_GENERIC &&
         pRawInputDevices[0].usUsage == HID_USAGE_GENERIC_MOUSE) {
-        debugf("RegisterRawInputDevices(mouse)\n");
+        debugf("RegisterRawInputDevices(mouse)");
 
         HWND hWnd = pRawInputDevices[0].hwndTarget;
 
@@ -691,10 +721,10 @@ AT_RegisterRawInputDevicesHook(
         try {
             AT_RegisterTouchpadInput(hWnd);
         } catch (const win32_error &e) {
-            debugf("RegisterRawInputDevices: win32_error(0x%x)\n", e.code());
+            debugf("RegisterRawInputDevices: win32_error(0x%x)", e.code());
         }
     } else {
-        debugf("RegisterRawInputDevices(other)\n");
+        debugf("RegisterRawInputDevices(other)");
     }
     return g_originalRegisterRawInputDevices(pRawInputDevices, uiNumDevices, cbSize);
 }
@@ -784,7 +814,7 @@ AT_CreateWindowExWHook(
         dwExStyle, lpClassName, lpWindowName, dwStyle,
         X, Y, nWidth, nHeight,
         hWndParent, hMenu, hInstance, lpParam);
-    debugf("CreateWindowExW() -> hWnd=%p\n", hWnd);
+    debugf("CreateWindowExW() -> hWnd=%p", hWnd);
     WNDPROC origWndProc;
 #if _WIN64
     origWndProc = (WNDPROC)g_originalSetWindowLongPtrW(hWnd, GWLP_WNDPROC, (LONG_PTR)AT_WndProcHook);
@@ -810,6 +840,32 @@ AT_CreateConsole()
     freopen("CONOUT$", "w", stderr);
 #pragma warning(pop)
 #endif
+}
+
+// Prints out information about all connected HID touchpads
+// to the debug console.
+static void
+AT_PrintTouchpadInfo()
+{
+    bool detected = false;
+    for (RAWINPUTDEVICELIST dev : AT_GetRawInputDeviceList()) {
+        RID_DEVICE_INFO info = AT_GetRawInputDeviceInfo(dev.hDevice);
+        if (info.dwType == RIM_TYPEHID &&
+            info.hid.usUsagePage == HID_USAGE_PAGE_DIGITIZER &&
+            info.hid.usUsage == HID_USAGE_DIGITIZER_TOUCH_PAD) {
+            at_device_info &info = AT_GetDeviceInfo(dev.hDevice);
+            if (!info.contactInfo.empty()) {
+                debugf("Detected touchpad with handle %p", dev.hDevice);
+                detected = true;
+            } else {
+                debugf("Detected touchpad, but could not parse report descriptor", dev.hDevice);
+            }
+        }
+    }
+
+    if (!detected) {
+        debugf("No touchpads detected");
+    }
 }
 
 // Called at startup to patch all the WinAPI functions.
@@ -839,7 +895,7 @@ static void
 AT_Uninitialize()
 {
     // Restore original WndProc functions
-    for (auto &wndproc : g_originalWndProcs) {
+    for (const auto &wndproc : g_originalWndProcs) {
 #if _WIN64
         g_originalSetWindowLongPtrW(wndproc.first, GWLP_WNDPROC, (LONG_PTR)wndproc.second);
 #else
@@ -876,6 +932,7 @@ DllMain(HINSTANCE hModule, DWORD dwReason, PVOID lpReserved)
     case DLL_PROCESS_ATTACH:
         DetourRestoreAfterWith();
         AT_CreateConsole();
+        AT_PrintTouchpadInfo();
         AT_Initialize();
         return TRUE;
     case DLL_PROCESS_DETACH:
