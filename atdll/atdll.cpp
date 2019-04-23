@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include <exception>
 #include <memory>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 #include <Windows.h>
@@ -184,7 +185,7 @@ AT_GetRawInputDeviceList()
 {
     std::vector<RAWINPUTDEVICELIST> devices(64);
     while (true) {
-        UINT numDevices = devices.size();
+        UINT numDevices = (UINT)devices.size();
         UINT ret = GetRawInputDeviceList(&devices[0], &numDevices, sizeof(RAWINPUTDEVICELIST));
         if (ret != (UINT)-1) {
             devices.resize(ret);
@@ -215,7 +216,7 @@ AT_GetRawInputDeviceInfo(HANDLE hDevice)
 static malloc_ptr<_HIDP_PREPARSED_DATA>
 AT_GetHidPreparsedData(HANDLE hDevice)
 {
-    UINT size;
+    UINT size = 0;
     if (GetRawInputDeviceInfoW(hDevice, RIDI_PREPARSEDDATA, nullptr, &size) == (UINT)-1) {
         throw win32_error();
     }

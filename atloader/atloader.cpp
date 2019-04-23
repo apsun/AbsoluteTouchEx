@@ -47,6 +47,7 @@ main(int argc, char *argv[])
 
     STARTUPINFOA startupInfo = { 0 };
     startupInfo.cb = sizeof(startupInfo);
+    PROCESS_INFORMATION procInfo;
     if (!DetourCreateProcessWithDllExA(
         targetPath.c_str(),
         nullptr,
@@ -57,7 +58,7 @@ main(int argc, char *argv[])
         nullptr,
         nullptr,
         &startupInfo,
-        nullptr,
+        &procInfo,
         atDllPath.c_str(),
         nullptr))
     {

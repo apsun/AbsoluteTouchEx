@@ -68,7 +68,7 @@ raw input mode; AbsoluteTouchEx will not work without it.
 
 Requirements:
 
-- Visual Studio 2017
+- Visual Studio 2019
 - Windows 10 SDK and WDK (for HID libraries)
 - [Detours](https://github.com/Microsoft/Detours)
 
