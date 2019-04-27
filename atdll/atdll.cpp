@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -21,10 +22,15 @@
 // that they should read our injected input.
 #define MAGIC_HANDLE ((HRAWINPUT)0)
 
-// Hotkey for the global toggle
-#define HOTKEY_ID 0xCAFE
-#define HOTKEY_MOD (MOD_SHIFT)
-#define HOTKEY_VK VK_F6
+// Hotkey for enable/disable toggle
+#define HOTKEY_ENABLE_ID 0xCAFE
+#define HOTKEY_ENABLE_MOD (MOD_SHIFT)
+#define HOTKEY_ENABLE_VK VK_F6
+
+// Hotkey for calibration mode toggle
+#define HOTKEY_CALIBRATION_ID 0xCAFF
+#define HOTKEY_CALIBRATION_MOD (MOD_SHIFT)
+#define HOTKEY_CALIBRATION_VK VK_F7
 
 // C++ exception wrapping the Win32 GetLastError() status
 class win32_error : std::exception
@@ -98,6 +104,7 @@ struct at_device_info
     malloc_ptr<_HIDP_PREPARSED_DATA> preparsedData; // HID internal data
     USHORT linkContactCount; // Link collection for number of contacts present
     std::vector<at_contact_info> contactInfo; // Link collection and touch area for each contact
+    std::optional<RECT> touchAreaOverride; // Override touch area for all points if set
 };
 
 // Hook trampolines
@@ -123,6 +130,12 @@ static std::unordered_map<HANDLE, at_device_info> g_devices;
 // Whether absolute input mode is enabled
 static bool g_enabled;
 
+// Whether currently in calibration mode
+static bool g_inCalibrationMode;
+
+// Current bounds for calibration mode
+static thread_local std::unordered_map<HANDLE, RECT> t_calibrationArea;
+
 // Holds the injected mouse input to be consumed by the real WndProc()
 static thread_local RAWINPUT t_injectedInput;
 
@@ -143,17 +156,19 @@ make_malloc(size_t size)
 }
 
 // C-style printf for debug output.
+#if DEBUG_MODE
 static void
 debugf(const char *fmt, ...)
 {
-#if DEBUG_MODE
     va_list args;
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
     va_end(args);
     putc('\n', stderr);
-#endif
 }
+#else
+#define debugf(...) ((void)0)
+#endif
 
 // Reads the raw input header for the given raw input handle.
 static RAWINPUTHEADER
@@ -376,8 +391,12 @@ AT_RegisterTouchpadInput(HWND hWnd)
 static POINT
 AT_TouchpadToScreen(RECT touchpadRect, POINT touchpadPoint)
 {
-    LONG tpDeltaX = touchpadPoint.x - touchpadRect.left;
-    LONG tpDeltaY = touchpadPoint.y - touchpadRect.top;
+    // Clamp point within touch bounds
+    LONG tpX = max(touchpadRect.left, min(touchpadRect.right, touchpadPoint.x));
+    LONG tpY = max(touchpadRect.top, min(touchpadRect.bottom, touchpadPoint.y));
+
+    LONG tpDeltaX = tpX - touchpadRect.left;
+    LONG tpDeltaY = tpY - touchpadRect.top;
 
     // As per HID spec, maximum is inclusive, so we need to add 1 here
     LONG tpWidth = touchpadRect.right + 1 - touchpadRect.left;
@@ -400,10 +419,11 @@ static at_device_info &
 AT_GetDeviceInfo(HANDLE hDevice)
 {
     if (g_devices.count(hDevice)) {
-        return g_devices[hDevice];
+        return g_devices.at(hDevice);
     }
     
     at_device_info dev;
+    std::optional<USHORT> linkContactCount;
     dev.preparsedData = AT_GetHidPreparsedData(hDevice);
 
     // Struct to hold our parser state
@@ -437,7 +457,7 @@ AT_GetDeviceInfo(HANDLE hDevice)
             }
         } else if (cap.UsagePage == HID_USAGE_PAGE_DIGITIZER) {
             if (cap.NotRange.Usage == HID_USAGE_DIGITIZER_CONTACT_COUNT) {
-                dev.linkContactCount = cap.LinkCollection;
+                linkContactCount = cap.LinkCollection;
             } else if (cap.NotRange.Usage == HID_USAGE_DIGITIZER_CONTACT_ID) {
                 contacts[cap.LinkCollection].hasContactID = true;
             }
@@ -451,6 +471,11 @@ AT_GetDeviceInfo(HANDLE hDevice)
             }
         }
     }
+
+    if (!linkContactCount.has_value()) {
+        throw std::runtime_error("No contact count usage found");
+    }
+    dev.linkContactCount = linkContactCount.value();
 
     for (const auto &kvp : contacts) {
         USHORT link = kvp.first;
@@ -563,6 +588,40 @@ AT_GetPrimaryContact(const std::vector<at_contact> &contacts)
     return contacts[0];
 }
 
+// Expands the calibration touch area to include all given contacts.
+static void
+AT_ExtendCalibrationArea(HANDLE hDevice, const std::vector<at_contact> &contacts)
+{
+    if (!t_calibrationArea.count(hDevice)) {
+        RECT &touchArea = t_calibrationArea[hDevice];
+        touchArea.left = LONG_MAX;
+        touchArea.top = LONG_MAX;
+        touchArea.right = LONG_MIN;
+        touchArea.bottom = LONG_MIN;
+    }
+
+    RECT &touchArea = t_calibrationArea.at(hDevice);
+    for (at_contact contact : contacts) {
+        touchArea.left = min(touchArea.left, contact.point.x);
+        touchArea.top = min(touchArea.top, contact.point.y);
+        touchArea.right = max(touchArea.right, contact.point.x);
+        touchArea.bottom = max(touchArea.bottom, contact.point.y);
+    }
+}
+
+// Returns the touch area for a given contact. If the device touch
+// area was overridden (by calibration mode), uses that; otherwise uses
+// the per-contact touch area.
+static RECT
+AT_GetTouchArea(at_device_info &dev, at_contact &contact)
+{
+    if (dev.touchAreaOverride.has_value()) {
+        return dev.touchAreaOverride.value();
+    } else {
+        return contact.info.touchArea;
+    }
+}
+
 // Handles a WM_INPUT event. May update wParam/lParam to be delivered
 // to the real WndProc. Returns true if the event is handled entirely
 // at the hook layer and should not be delivered to the real WndProc.
@@ -588,23 +647,32 @@ AT_HandleRawInput(WPARAM *wParam, LPARAM *lParam)
     at_device_info &dev = AT_GetDeviceInfo(hdr.hDevice);
     malloc_ptr<RAWINPUT> input = AT_GetRawInput(hInput, hdr);
     std::vector<at_contact> contacts = AT_GetContacts(dev, input.get());
-    if (contacts.size() == 0) {
+    if (contacts.empty()) {
+        return true;
+    }
+
+    // If we're in calibration mode, swallow input and extend the
+    // touch bounding area.
+    if (g_inCalibrationMode) {
+        AT_ExtendCalibrationArea(hdr.hDevice, contacts);
         return true;
     }
 
     at_contact contact = AT_GetPrimaryContact(contacts);
-    POINT screenPoint = AT_TouchpadToScreen(contact.info.touchArea, contact.point);
+    RECT touchArea = AT_GetTouchArea(dev, contact);
+    POINT screenPoint = AT_TouchpadToScreen(touchArea, contact.point);
 
-    t_injectedInput.header.dwType = RIM_TYPEMOUSE;
-    t_injectedInput.header.dwSize = sizeof(RAWINPUT);
-    t_injectedInput.header.wParam = *wParam;
-    t_injectedInput.header.hDevice = input->header.hDevice;
-    t_injectedInput.data.mouse.usFlags = MOUSE_MOVE_ABSOLUTE;
-    t_injectedInput.data.mouse.ulExtraInformation = 0;
-    t_injectedInput.data.mouse.usButtonFlags = 0;
-    t_injectedInput.data.mouse.usButtonData = 0;
-    t_injectedInput.data.mouse.lLastX = screenPoint.x;
-    t_injectedInput.data.mouse.lLastY = screenPoint.y;
+    RAWINPUT *injectedInput = &t_injectedInput;
+    injectedInput->header.dwType = RIM_TYPEMOUSE;
+    injectedInput->header.dwSize = sizeof(RAWINPUT);
+    injectedInput->header.wParam = *wParam;
+    injectedInput->header.hDevice = input->header.hDevice;
+    injectedInput->data.mouse.usFlags = MOUSE_MOVE_ABSOLUTE;
+    injectedInput->data.mouse.ulExtraInformation = 0;
+    injectedInput->data.mouse.usButtonFlags = 0;
+    injectedInput->data.mouse.usButtonData = 0;
+    injectedInput->data.mouse.lLastX = screenPoint.x;
+    injectedInput->data.mouse.lLastY = screenPoint.y;
 
     *lParam = (LPARAM)MAGIC_HANDLE;
     return false;
@@ -656,6 +724,20 @@ AT_GetRawInputDataHook(
     }
 }
 
+// Toggles on/off calibration mode, committing changes made to the
+// touch area of any devices.
+static void
+AT_ToggleCalibrationMode()
+{
+    if (g_inCalibrationMode) {
+        for (const auto &entry : t_calibrationArea) {
+            g_devices.at(entry.first).touchAreaOverride = entry.second;
+        }
+        t_calibrationArea.clear();
+    }
+    g_inCalibrationMode = !g_inCalibrationMode;
+}
+
 // Our fake WndProc that intercepts any WM_INPUT messages.
 // Any non-WM_INPUT messages and unhandled WM_INPUT messages
 // are delivered to the real WndProc.
@@ -666,13 +748,17 @@ AT_WndProcHook(
     WPARAM wParam,
     LPARAM lParam)
 {
-    if (message == WM_HOTKEY && wParam == HOTKEY_ID) {
+    if (message == WM_HOTKEY && wParam == HOTKEY_ENABLE_ID) {
         g_enabled = !g_enabled;
         debugf("Absolute touch mode -> %s", g_enabled ? "ON" : "OFF");
         return 0;
+    } else if (message == WM_HOTKEY && wParam == HOTKEY_CALIBRATION_ID) {
+        AT_ToggleCalibrationMode();
+        debugf("Calibration mode -> %s", g_inCalibrationMode ? "ON" : "OFF");
+        return 0;
     }
 
-    if (g_enabled) {
+    if (g_enabled || g_inCalibrationMode) {
         if (message == WM_MOUSEMOVE) {
             return 0;
         }
@@ -694,7 +780,7 @@ AT_WndProcHook(
         }
     }
 
-    return CallWindowProcW(g_originalWndProcs[hWnd], hWnd, message, wParam, lParam);
+    return CallWindowProcW(g_originalWndProcs.at(hWnd), hWnd, message, wParam, lParam);
 }
 
 // Hook for RegisterRawInputDevices(). Any windows that register for
@@ -717,7 +803,8 @@ AT_RegisterRawInputDevicesHook(
         // Register hotkey here since we only want to do this once, and generally
         // chances are that only one window will be receiving raw input. Ignore errors.
         // This is a bit ugly, but it works well enough for our purposes.
-        RegisterHotKey(hWnd, HOTKEY_ID, HOTKEY_MOD, HOTKEY_VK);
+        RegisterHotKey(hWnd, HOTKEY_ENABLE_ID, HOTKEY_ENABLE_MOD, HOTKEY_ENABLE_VK);
+        RegisterHotKey(hWnd, HOTKEY_CALIBRATION_ID, HOTKEY_CALIBRATION_MOD, HOTKEY_CALIBRATION_VK);
 
         try {
             AT_RegisterTouchpadInput(hWnd);
@@ -740,7 +827,7 @@ AT_GetWindowLongPtrWHook(
     int nIndex)
 {
     if (nIndex == GWLP_WNDPROC && g_originalWndProcs.count(hWnd)) {
-        return (LONG_PTR)g_originalWndProcs[hWnd];
+        return (LONG_PTR)g_originalWndProcs.at(hWnd);
     }
     return g_originalGetWindowLongPtrW(hWnd, nIndex);
 }
@@ -754,7 +841,7 @@ AT_SetWindowLongPtrWHook(
     LONG_PTR dwNewLong)
 {
     if (nIndex == GWLP_WNDPROC && g_originalWndProcs.count(hWnd)) {
-        WNDPROC origWndProc = g_originalWndProcs[hWnd];
+        WNDPROC origWndProc = g_originalWndProcs.at(hWnd);
         g_originalWndProcs[hWnd] = (WNDPROC)dwNewLong;
         return (LONG_PTR)origWndProc;
     }
@@ -771,7 +858,7 @@ AT_GetWindowLongWHook(
     int nIndex)
 {
     if (nIndex == GWL_WNDPROC && g_originalWndProcs.count(hWnd)) {
-        return (LONG)g_originalWndProcs[hWnd];
+        return (LONG)g_originalWndProcs.at(hWnd);
     }
     return g_originalGetWindowLongW(hWnd, nIndex);
 }
@@ -785,7 +872,7 @@ AT_SetWindowLongWHook(
     LONG dwNewLong)
 {
     if (nIndex == GWL_WNDPROC && g_originalWndProcs.count(hWnd)) {
-        WNDPROC origWndProc = g_originalWndProcs[hWnd];
+        WNDPROC origWndProc = g_originalWndProcs.at(hWnd);
         g_originalWndProcs[hWnd] = (WNDPROC)dwNewLong;
         return (LONG)origWndProc;
     }

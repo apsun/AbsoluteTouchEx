@@ -43,11 +43,11 @@ version with the same bitness as the program that you are injecting it
 into, NOT the bitness of your operating system! x86 is for 32-bit programs
 and x64 is for 64-bit programs.
 
-Make sure you have the Visual C++ 2017 Redistributable installed (again,
+Make sure you have the Visual C++ 2019 Redistributable installed (again,
 for the bitness version that you intend to run, not for the bitness of
 your operating system). You can download the 32-bit version
-[here](https://aka.ms/vs/15/release/vc_redist.x86.exe) and the 64-bit
-version [here](https://aka.ms/vs/15/release/vc_redist.x64.exe).
+[here](https://aka.ms/vs/16/release/vc_redist.x86.exe) and the 64-bit
+version [here](https://aka.ms/vs/16/release/vc_redist.x64.exe).
 
 Extract `atloader.exe` and `atdll.dll` to the same directory, then
 run the following command:
@@ -64,15 +64,23 @@ Initially at program startup, absolute touch mode will be disabled.
 You can toggle it on and off by pressing `SHIFT + F6`. Make sure to enable
 raw input mode; AbsoluteTouchEx will not work without it.
 
+To adjust the area of your touchpad that gets mapped to the screen, press
+`SHIFT + F7` to enter calibration mode. Draw a rectangle on your touchpad
+around the area that you wish to use (simply touching the top-left and
+bottom-right corners is also sufficient), then press `SHIFT + F7` again to
+save. Note that this must be done every time AbsoluteTouchEx is run; your
+settings are not saved to disk. While in calibration mode, your cursor
+will not move; that is normal.
+
 ## Building the project
 
 Requirements:
 
 - Visual Studio 2019
 - Windows 10 SDK and WDK (for HID libraries)
-- [Detours](https://github.com/Microsoft/Detours)
 
 The project should open and build with no configuration necessary, assuming
-you correctly installed the dependencies above. A prebuilt version of Detours
-is included in the source directory; if you wish to update it you are
-responsible for building it yourself.
+you correctly installed the dependencies above. A prebuilt version of
+[Detours](https://github.com/Microsoft/Detours) is included in the source
+directory; if you wish to update it you are responsible for building it
+yourself.
