@@ -11,8 +11,14 @@
 #include <hidusage.h>
 #include "detours.h"
 
-// Whether to create the debug output window
+// Version number
+#define VERSION_STRING "1.1.1"
+
+// Whether to output debugging information
 #define DEBUG_MODE 1
+
+// If defined, writes debug output to this log file
+#define DEBUG_FILE "atdebug.log"
 
 // HID usages that are not already defined
 #define HID_USAGE_DIGITIZER_CONTACT_ID 0x51
@@ -133,6 +139,9 @@ static bool g_enabled;
 // Whether currently in calibration mode
 static bool g_inCalibrationMode;
 
+// File to write debug output to
+static FILE *g_debugFile;
+
 // Current bounds for calibration mode
 static thread_local std::unordered_map<HANDLE, RECT> t_calibrationArea;
 
@@ -158,13 +167,24 @@ make_malloc(size_t size)
 // C-style printf for debug output.
 #if DEBUG_MODE
 static void
-debugf(const char *fmt, ...)
+vfdebugf(FILE *f, const char *fmt, va_list args)
+{
+    vfprintf(f, fmt, args);
+    putc('\n', f);
+}
+
+static void
+debugf(const char* fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
+    vfdebugf(stderr, fmt, args);
+#ifdef DEBUG_FILE
+    if (g_debugFile != nullptr) {
+        vfdebugf(g_debugFile, fmt, args);
+    }
+#endif
     va_end(args);
-    putc('\n', stderr);
 }
 #else
 #define debugf(...) ((void)0)
@@ -421,7 +441,7 @@ AT_GetDeviceInfo(HANDLE hDevice)
     if (g_devices.count(hDevice)) {
         return g_devices.at(hDevice);
     }
-    
+
     at_device_info dev;
     std::optional<USHORT> linkContactCount;
     dev.preparsedData = AT_GetHidPreparsedData(hDevice);
@@ -505,6 +525,7 @@ AT_GetContacts(at_device_info &dev, RAWINPUT *input)
     DWORD count = input->data.hid.dwCount;
     BYTE *rawData = input->data.hid.bRawData;
     if (count == 0) {
+        debugf("Raw input contained no HID events");
         return contacts;
     }
 
@@ -516,9 +537,10 @@ AT_GetContacts(at_device_info &dev, RAWINPUT *input)
         dev.preparsedData.get(),
         rawData,
         sizeHid);
-    
+
     if (numContacts > dev.contactInfo.size()) {
-        throw std::runtime_error("Device reported more contacts than we have links");
+        debugf("Device reported more contacts (%u) than we have links (%zu)", numContacts, dev.contactInfo.size());
+        numContacts = (ULONG)dev.contactInfo.size();
     }
 
     // It's a little ambiguous as to whether contact count includes
@@ -534,8 +556,9 @@ AT_GetContacts(at_device_info &dev, RAWINPUT *input)
             dev.preparsedData.get(),
             rawData,
             sizeHid);
-        
+
         if (!tip) {
+            debugf("Contact has tip = 0, ignoring");
             continue;
         }
 
@@ -632,6 +655,8 @@ AT_HandleRawInput(WPARAM *wParam, LPARAM *lParam)
     HRAWINPUT hInput = (HRAWINPUT)*lParam;
     RAWINPUTHEADER hdr = AT_GetRawInputHeader(hInput);
     if (hdr.dwType != RIM_TYPEHID) {
+        debugf("Got raw input for device %p with event type != HID: %u", hdr.hDevice, hdr.dwType);
+
         // Suppress mouse input events to prevent it from getting
         // mixed in with our absolute movement events. Unfortunately
         // this has the side effect of disabling all non-touchpad
@@ -643,11 +668,14 @@ AT_HandleRawInput(WPARAM *wParam, LPARAM *lParam)
         }
         return false;
     }
-    
+
+    debugf("Got HID raw input event for device %p", hdr.hDevice);
+
     at_device_info &dev = AT_GetDeviceInfo(hdr.hDevice);
     malloc_ptr<RAWINPUT> input = AT_GetRawInput(hInput, hdr);
     std::vector<at_contact> contacts = AT_GetContacts(dev, input.get());
     if (contacts.empty()) {
+        debugf("Found no contacts in input event");
         return true;
     }
 
@@ -662,6 +690,7 @@ AT_HandleRawInput(WPARAM *wParam, LPARAM *lParam)
     RECT touchArea = AT_GetTouchArea(dev, contact);
     POINT screenPoint = AT_TouchpadToScreen(touchArea, contact.point);
 
+    debugf("Injecting input at (%d,%d) for device %p", screenPoint.x, screenPoint.y, input->header.hDevice);
     RAWINPUT *injectedInput = &t_injectedInput;
     injectedInput->header.dwType = RIM_TYPEMOUSE;
     injectedInput->header.dwSize = sizeof(RAWINPUT);
@@ -690,10 +719,12 @@ AT_GetRawInputDataHook(
     UINT cbSizeHeader)
 {
     if (hRawInput != MAGIC_HANDLE) {
+        debugf("GetRawInputDataHook(hRawInput=%p)", hRawInput);
         return g_originalGetRawInputData(hRawInput, uiCommand, pData, pcbSize, cbSizeHeader);
     }
 
     if (cbSizeHeader != sizeof(RAWINPUTHEADER)) {
+        debugf("GetRawInputDataHook: cbSizeHeader != sizeof(RAWINPUTHEADER)");
         return (UINT)-1;
     }
 
@@ -709,15 +740,19 @@ AT_GetRawInputDataHook(
         size = sizeof(t_injectedInput);
         break;
     default:
+        debugf("GetRawInputDataHook: unknown uiCommand: %u", uiCommand);
         return (UINT)-1;
     }
-    
+
     if (pData == nullptr) {
+        debugf("GetRawInputDataHook: pData == nullptr, write %u -> size", size);
         *pcbSize = size;
         return 0;
     } else if (*pcbSize < size) {
+        debugf("GetRawInputDataHook: *pcbSize < size");
         return (UINT)-1;
     } else {
+        debugf("GetRawInputDataHook: pData == %p, write %u bytes", pData, size);
         memcpy(pData, data, size);
         *pcbSize = size;
         return size;
@@ -760,6 +795,7 @@ AT_WndProcHook(
 
     if (g_enabled || g_inCalibrationMode) {
         if (message == WM_MOUSEMOVE) {
+            debugf("Suppressing WM_MOUSEMOVE message");
             return 0;
         }
 
@@ -793,27 +829,34 @@ AT_RegisterRawInputDevicesHook(
     UINT uiNumDevices,
     UINT cbSize)
 {
-    if (uiNumDevices > 0 &&
-        pRawInputDevices[0].usUsagePage == HID_USAGE_PAGE_GENERIC &&
-        pRawInputDevices[0].usUsage == HID_USAGE_GENERIC_MOUSE) {
-        debugf("RegisterRawInputDevices(mouse)");
-
-        HWND hWnd = pRawInputDevices[0].hwndTarget;
-
-        // Register hotkey here since we only want to do this once, and generally
-        // chances are that only one window will be receiving raw input. Ignore errors.
-        // This is a bit ugly, but it works well enough for our purposes.
-        RegisterHotKey(hWnd, HOTKEY_ENABLE_ID, HOTKEY_ENABLE_MOD, HOTKEY_ENABLE_VK);
-        RegisterHotKey(hWnd, HOTKEY_CALIBRATION_ID, HOTKEY_CALIBRATION_MOD, HOTKEY_CALIBRATION_VK);
-
-        try {
-            AT_RegisterTouchpadInput(hWnd);
-        } catch (const win32_error &e) {
-            debugf("RegisterRawInputDevices: win32_error(0x%x)", e.code());
-        }
-    } else {
-        debugf("RegisterRawInputDevices(other)");
+    if (uiNumDevices == 0) {
+        debugf("RegisterRawInputDevices called with no devices");
+        return false;
     }
+
+    for (UINT i = 0; i < uiNumDevices; ++i) {
+        const RAWINPUTDEVICE* dev = &pRawInputDevices[i];
+        HWND hWnd = dev->hwndTarget;
+        debugf("RegisterRawInputDevices: {hWnd=%p, usagePage=%d, usage=%d, flags=0x%x}",
+            hWnd, dev->usUsagePage, dev->usUsage, dev->dwFlags);
+
+        if (dev->usUsagePage == HID_USAGE_PAGE_GENERIC && dev->usUsage == HID_USAGE_GENERIC_MOUSE) {
+            // Register hotkey here since we only want to do this once, and generally
+            // chances are that only one window will be receiving raw input. Ignore errors.
+            // This is a bit ugly, but it works well enough for our purposes.
+            debugf("Registering global hotkeys with hWnd=%p", hWnd);
+            RegisterHotKey(hWnd, HOTKEY_ENABLE_ID, HOTKEY_ENABLE_MOD, HOTKEY_ENABLE_VK);
+            RegisterHotKey(hWnd, HOTKEY_CALIBRATION_ID, HOTKEY_CALIBRATION_MOD, HOTKEY_CALIBRATION_VK);
+
+            debugf("Registering touchpad input with hWnd=%p", hWnd);
+            try {
+                AT_RegisterTouchpadInput(hWnd);
+            } catch (const win32_error &e) {
+                debugf("RegisterRawInputDevices: win32_error(0x%x)", e.code());
+            }
+        }
+    }
+
     return g_originalRegisterRawInputDevices(pRawInputDevices, uiNumDevices, cbSize);
 }
 
@@ -915,8 +958,10 @@ AT_CreateWindowExWHook(
 
 // Creates a console and redirects input/output streams to it.
 // Used to display debug output in non-console applications.
+// If DEBUG_FILE is set, opens the log file and points g_debugFile
+// to it.
 static void
-AT_CreateConsole()
+AT_StartDebugMode()
 {
 #if DEBUG_MODE
     FreeConsole();
@@ -926,15 +971,36 @@ AT_CreateConsole()
     freopen("CONIN$", "r", stdin);
     freopen("CONOUT$", "w", stdout);
     freopen("CONOUT$", "w", stderr);
+#ifdef DEBUG_FILE
+    g_debugFile = fopen(DEBUG_FILE, "w");
+    if (g_debugFile == nullptr) {
+        debugf("Failed to open debug file for writing");
+    }
+#endif
 #pragma warning(pop)
+#endif
+}
+
+// If DEBUG_FILE is set, closes g_debugFile.
+static void
+AT_StopDebugMode()
+{
+#if DEBUG_MODE
+#ifdef DEBUG_FILE
+    if (g_debugFile != nullptr) {
+        fclose(g_debugFile);
+    }
+#endif
 #endif
 }
 
 // Prints out information about all connected HID touchpads
 // to the debug console.
 static void
-AT_PrintTouchpadInfo()
+AT_PrintSystemInfo()
 {
+    debugf("AbsoluteTouchEx v%s", VERSION_STRING);
+
     bool detected = false;
     for (RAWINPUTDEVICELIST dev : AT_GetRawInputDeviceList()) {
         RID_DEVICE_INFO info = AT_GetRawInputDeviceInfo(dev.hDevice);
@@ -943,7 +1009,7 @@ AT_PrintTouchpadInfo()
             info.hid.usUsage == HID_USAGE_DIGITIZER_TOUCH_PAD) {
             at_device_info &info = AT_GetDeviceInfo(dev.hDevice);
             if (!info.contactInfo.empty()) {
-                debugf("Detected touchpad with handle %p", dev.hDevice);
+                debugf("Detected touchpad with handle %p, %zu contacts", dev.hDevice, info.contactInfo.size());
                 detected = true;
             } else {
                 debugf("Detected touchpad, but could not parse report descriptor", dev.hDevice);
@@ -1019,12 +1085,13 @@ DllMain(HINSTANCE hModule, DWORD dwReason, PVOID lpReserved)
     switch (dwReason) {
     case DLL_PROCESS_ATTACH:
         DetourRestoreAfterWith();
-        AT_CreateConsole();
-        AT_PrintTouchpadInfo();
+        AT_StartDebugMode();
+        AT_PrintSystemInfo();
         AT_Initialize();
         return TRUE;
     case DLL_PROCESS_DETACH:
         AT_Uninitialize();
+        AT_StopDebugMode();
         return TRUE;
     default:
         return TRUE;
