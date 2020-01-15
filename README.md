@@ -51,11 +51,13 @@ version [here](https://aka.ms/vs/16/release/vc_redist.x64.exe).
 
 Extract `atloader.exe` and `atdll.dll` to the same directory, then
 run the following command:
+
 ```
 atloader.exe <path to exe to load>
 ```
 
 For example, to run osu! (which, for the record, is a 32-bit program):
+
 ```
 atloader.exe %LocalAppData%\osu!\osu!.exe
 ```
@@ -68,9 +70,11 @@ To adjust the area of your touchpad that gets mapped to the screen, press
 `SHIFT + F7` to enter calibration mode. Draw a rectangle on your touchpad
 around the area that you wish to use (simply touching the top-left and
 bottom-right corners is also sufficient), then press `SHIFT + F7` again to
-save. Note that this must be done every time AbsoluteTouchEx is run; your
-settings are not saved to disk. While in calibration mode, your cursor
-will not move; that is normal.
+apply it. While in calibration mode, your cursor will not move; that is
+normal.
+
+To save your calibration settings, press `SHIFT + F9`. The next time you
+run AbsoluteTouchEx, press `SHIFT + F8` to load your configuration.
 
 ## Building the project
 
